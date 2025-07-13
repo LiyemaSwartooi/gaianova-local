@@ -6,8 +6,9 @@ import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
 import { motion } from 'framer-motion'
-import { ArrowLeft, Building, Users, BarChart3, Eye, EyeOff, PartyPopper, XCircle, CheckCircle, AlertCircle } from "lucide-react"
+import { ArrowLeft, Building, Users, BarChart3, Eye, EyeOff, PartyPopper, XCircle, CheckCircle, AlertCircle, Home, Phone, Settings, UserCog, Truck, Shield } from "lucide-react"
 import { toast } from "sonner"
+import { SOUTH_AFRICAN_MUNICIPALITIES } from '../data/municipalities'
 const logo = '/img/Gaianova_logo-removebg-preview.png'
 
 const signInSchema = z.object({
@@ -18,7 +19,7 @@ const signInSchema = z.object({
   password: z.string()
     .min(1, "Password is required")
     .min(6, "Password must be at least 6 characters"),
-  userType: z.enum(["citizen", "municipal-staff", "ward-councillor", "contractor", "reporter", "admin"], {
+  userType: z.enum(["citizen", "municipal-staff", "ward-councillor", "department-head", "fleet-manager", "call-center-agent"], {
     required_error: "Please select your role",
   }),
 })
@@ -46,13 +47,11 @@ const signUpSchema = z.object({
     .regex(/^(?=.*[a-zA-Z])(?=.*\d)/, "Password must contain at least one letter and one number"),
   confirmPassword: z.string()
     .min(1, "Please confirm your password"),
-  userType: z.enum(["citizen", "municipal-staff", "ward-councillor", "contractor", "reporter", "admin"], {
+  userType: z.enum(["citizen", "municipal-staff", "ward-councillor", "department-head", "fleet-manager", "call-center-agent"], {
     required_error: "Please select your role",
   }),
   municipality: z.string()
-    .min(1, "Municipality is required")
-    .min(3, "Municipality name must be at least 3 characters")
-    .max(100, "Municipality name must be less than 100 characters"),
+    .min(1, "Please select your municipality"),
   ward: z.string().optional(),
   phoneNumber: z.string()
     .min(1, "Phone number is required")
@@ -156,7 +155,12 @@ export default function AccessPortal({ onBack }: AccessPortalProps) {
       const userData = {
         email: formData.email,
         name: userName,
-        type: formData.userType
+        type: formData.userType,
+        municipality: {
+          id: 'sol-plaatje',
+          name: 'Sol Plaatje Local Municipality',
+          province: 'Northern Cape'
+        }
       }
       
       localStorage.setItem('user', JSON.stringify(userData))
@@ -166,12 +170,31 @@ export default function AccessPortal({ onBack }: AccessPortalProps) {
         duration: 3000,
       })
 
-      // Redirect based on selected role
+      // Smart routing based on user role
       setTimeout(() => {
-        if (formData.userType === "municipal-staff" || formData.userType === "ward-councillor" || formData.userType === "admin") {
-          navigate("/civic-dashboard")
-        } else {
-          navigate("/report")
+        switch (formData.userType) {
+          case "department-head":
+          case "fleet-manager":
+            // Management level - Municipal Dashboard
+            navigate("/municipal-dashboard", { state: { userData } });
+            break;
+          case "ward-councillor":
+            // Ward Councillors - Specialized Ward Dashboard
+            navigate("/ward-councillor", { state: { userData } });
+            break;
+          case "call-center-agent":
+            // Call center staff - Call Center Dashboard
+            navigate("/call-center", { state: { userData } });
+            break;
+          case "municipal-staff":
+            // Ground workers - Field Worker Dashboard
+            navigate("/field-dashboard", { state: { userData } });
+            break;
+          case "citizen":
+          default:
+            // Citizens - Public reporting portal
+            navigate("/report");
+            break;
         }
       }, 1500)
     } catch (error: any) {
@@ -204,22 +227,24 @@ export default function AccessPortal({ onBack }: AccessPortalProps) {
         throw new Error('This email is already registered. Please sign in instead.')
       }
 
-      // Check admin limit
-      if (formData.userType === 'admin') {
-        // Mock check - in real app, query your database
-        const existingAdmins = 2 // Mock count
-        if (existingAdmins >= 5) {
-          throw new Error('Registration limit reached. Maximum of 5 administrators allowed. Please contact support if you need admin access.')
-        }
-      }
+
+
+      // Find selected municipality
+      const selectedMunicipality = SOUTH_AFRICAN_MUNICIPALITIES.find(
+        municipality => municipality.id === formData.municipality
+      )
 
       // Store user data
       localStorage.setItem('user', JSON.stringify({
         email: formData.email,
         name: `${formData.firstName} ${formData.lastName}`,
         type: formData.userType,
-        building: formData.municipality,
-        unit: formData.ward
+        municipality: {
+          id: formData.municipality,
+          name: selectedMunicipality?.name || formData.municipality,
+          province: selectedMunicipality?.province
+        },
+        ward: formData.ward
       }))
 
       toast.success(`Welcome to Gaianova Local, ${formData.firstName}! Your account has been created successfully!`, {
@@ -229,8 +254,26 @@ export default function AccessPortal({ onBack }: AccessPortalProps) {
 
       // Redirect based on user type
       setTimeout(() => {
-        if (formData.userType === 'municipal-staff' || formData.userType === 'ward-councillor' || formData.userType === 'admin') {
-          navigate('/civic-dashboard')
+        if (formData.userType === 'municipal-staff' || formData.userType === 'ward-councillor' || formData.userType === 'department-head' || formData.userType === 'fleet-manager' || formData.userType === 'call-center-agent') {
+          // Municipal staff routes
+          switch (formData.userType) {
+            case "department-head":
+            case "fleet-manager":
+              navigate('/municipal-dashboard');
+              break;
+            case "ward-councillor":
+              navigate('/ward-councillor');
+              break;
+            case "call-center-agent":
+              navigate('/call-center');
+              break;
+            case "municipal-staff":
+              navigate('/field-dashboard');
+              break;
+            default:
+              navigate('/municipal-dashboard');
+              break;
+          }
         } else {
           navigate('/report')
         }
@@ -395,12 +438,12 @@ export default function AccessPortal({ onBack }: AccessPortalProps) {
                           signInForm.formState.errors.userType ? "border-red-500" : "border-gray-300"
                         }`}
                         >
-                          <option value="citizen">Citizen</option>
-                          <option value="municipal-staff">Municipal Staff</option>
-                          <option value="ward-councillor">Ward Councillor</option>
-                          <option value="contractor">Contractor</option>
-                          <option value="reporter">Reporter</option>
-                          <option value="admin">Administrator</option>
+                          <option value="citizen">Citizen - Report issues & track status</option>
+                          <option value="call-center-agent">Call Center Agent - Manage reports & calls</option>
+                          <option value="municipal-staff">Municipal Staff - Field worker & technician</option>
+                          <option value="ward-councillor">Ward Councillor - Community leader & advocate</option>
+                          <option value="department-head">Department Head - Municipal management</option>
+                          <option value="fleet-manager">Fleet Manager - Municipal management</option>
                         </select>
                         {signInForm.formState.errors.userType && (
                           <p className="text-red-500 text-xs mt-1">
@@ -490,21 +533,19 @@ export default function AccessPortal({ onBack }: AccessPortalProps) {
                             signUpForm.formState.errors.userType ? "border-red-500" : "border-gray-300"
                           }`}
                         >
-                          <option value="citizen">Citizen</option>
-                          <option value="municipal-staff">Municipal Staff</option>
-                          <option value="ward-councillor">Ward Councillor</option>
-                          <option value="contractor">Contractor</option>
-                          <option value="reporter">Reporter</option>
-                          <option value="admin">Administrator</option>
+                          <option value="citizen">Citizen - Report issues & track status</option>
+                          <option value="call-center-agent">Call Center Agent - Manage reports & calls</option>
+                          <option value="municipal-staff">Municipal Staff - Field worker & technician</option>
+                          <option value="ward-councillor">Ward Councillor - Community leader & advocate</option>
+                          <option value="department-head">Department Head - Municipal management</option>
+                          <option value="fleet-manager">Fleet Manager - Municipal management</option>
                         </select>
                         {signUpForm.formState.errors.userType && (
                           <p className="text-red-500 text-xs mt-1">
                             {signUpForm.formState.errors.userType.message}
                           </p>
                         )}
-                        <p className="text-xs text-gray-600 mt-1">
-                          Note: Administrator registration is limited to 5 users maximum
-                        </p>
+
                       </div>
 
                       <div className="grid grid-cols-2 gap-4">
@@ -571,14 +612,20 @@ export default function AccessPortal({ onBack }: AccessPortalProps) {
                         <label htmlFor="municipality" className="block text-sm font-medium text-gray-700 mb-1">
                           Municipality
                         </label>
-                        <input
+                        <select
                           id="municipality"
-                          placeholder="Enter your municipality"
                           className={`w-full px-3 py-2 border rounded-md focus:outline-none focus:ring-2 focus:ring-emerald-500 focus:border-emerald-500 ${
                             signUpForm.formState.errors.municipality ? "border-red-500" : "border-gray-300"
                           }`}
                           {...signUpForm.register("municipality")}
-                        />
+                        >
+                          <option value="">Select your municipality</option>
+                          {SOUTH_AFRICAN_MUNICIPALITIES.map(municipality => (
+                            <option key={municipality.id} value={municipality.id}>
+                              {municipality.name} ({municipality.province})
+                            </option>
+                          ))}
+                        </select>
                         {signUpForm.formState.errors.municipality && (
                           <p className="text-red-500 text-xs mt-1">
                             {signUpForm.formState.errors.municipality.message}

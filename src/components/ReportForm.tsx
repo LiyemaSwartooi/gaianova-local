@@ -4,10 +4,12 @@ import { useState, useEffect } from "react"
 import { useForm } from "react-hook-form"
 import { zodResolver } from "@hookform/resolvers/zod"
 import { z } from "zod"
-import { Send, AlertTriangle, CheckCircle, XCircle, Circle, AlertCircle, Zap, Shield, ChevronDown, ChevronUp, ChevronRight, ChevronLeft, User, LogOut, MapPin, Flag, FileText, Camera, Navigation, Loader2, BarChart3 } from "lucide-react"
+import { Send, AlertTriangle, CheckCircle, XCircle, Circle, AlertCircle, Zap, Shield, ChevronDown, ChevronUp, ChevronRight, ChevronLeft, User, LogOut, MapPin, Flag, FileText, Camera, Navigation, Loader2, BarChart3, Building, Clock, Phone, Trash2, X } from "lucide-react"
 import { toast } from "sonner"
 import { useNavigate } from "react-router-dom"
 import { motion } from 'framer-motion'
+import { SOUTH_AFRICAN_MUNICIPALITIES, MUNICIPAL_ISSUE_CATEGORIES, getMunicipalityById, getWardsByMunicipality } from '../data/municipalities'
+import { validateMunicipalScope, generateEnhancedReferenceNumber, assignDepartment, getExpectedResolutionTime } from '../utils/municipalUtils'
 const logo = '/img/Gaianova_logo-removebg-preview.png'
 
 const reportSchema = z.object({
@@ -31,8 +33,7 @@ const reportSchema = z.object({
   municipality: z.string()
     .min(1, "Please select your municipality"),
   ward: z.string()
-    .min(1, "Ward number is required")
-    .regex(/^[0-9]+$/, "Ward must be a number"),
+    .min(1, "Ward number is required"),
   location: z.string()
     .min(1, "Specific location is required")
     .min(5, "Location must be at least 5 characters")
@@ -41,6 +42,7 @@ const reportSchema = z.object({
   // Step 3: Issue Details
   category: z.string()
     .min(1, "Please select an issue type"),
+  subcategory: z.string().optional(),
   priority: z.enum(["low", "medium", "high", "emergency"], {
     required_error: "Please select a priority level",
   }),
@@ -53,6 +55,12 @@ const reportSchema = z.object({
     .min(10, "Description must be at least 10 characters")
     .max(1000, "Description must be less than 1000 characters"),
   photoUrl: z.string().optional(),
+  images: z.array(z.object({
+    id: z.string(),
+    url: z.string(),
+    fileName: z.string(),
+    fileSize: z.number()
+  })).optional().default([]),
 })
 
 type ReportFormData = z.infer<typeof reportSchema>
@@ -113,57 +121,156 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
     }, 1000)
   }
 
-  // South African Municipalities (Major ones)
-  const municipalities = [
-    'City of Cape Town',
-    'City of Johannesburg', 
-    'City of Tshwane (Pretoria)',
-    'eThekwini Municipality (Durban)',
-    'Ekurhuleni Metropolitan Municipality',
-    'Nelson Mandela Bay Municipality (Port Elizabeth)',
-    'Buffalo City Metropolitan Municipality (East London)',
-    'Mangaung Metropolitan Municipality (Bloemfontein)',
-    'Polokwane Local Municipality',
-    'Steve Tshwete Local Municipality',
-    'Sol Plaatje Local Municipality',
-    'Matjhabeng Local Municipality'
-  ]
-
-  // Civic Issue Categories
-  const categories = [
-    'Illegal Dumping',
-    'Potholes & Road Damage',
-    'Broken Streetlights',
-    'Water Issues',
-    'Sewage Problems',
-    'Waste Collection',
-    'Traffic Lights',
-    'Public Safety',
-    'Parks & Recreation',
-    'Graffiti & Vandalism',
-    'Stormwater Drainage',
-    'Other Civic Issues'
-  ]
+  // State for selected category and subcategory
+  const [selectedCategory, setSelectedCategory] = useState<string>('')
+  const [selectedSubcategory, setSelectedSubcategory] = useState<string>('')
+  const [scopeValidation, setScopeValidation] = useState<{ isValid: boolean; message: string } | null>(null)
+  const [uploadedImages, setUploadedImages] = useState<Array<{id: string, url: string, fileName: string, fileSize: number}>>([])
+  const [isUploading, setIsUploading] = useState(false)
+  const [dragActive, setDragActive] = useState(false)
 
   const form = useForm<ReportFormData>({
     resolver: zodResolver(reportSchema),
     defaultValues: {
-      reporterName: "",
-      reporterEmail: "",
+      reporterName: userData?.name || "",
+      reporterEmail: userData?.email || "",
       reporterPhone: "",
-      municipality: "",
+      municipality: userData?.municipality?.name || "Sol Plaatje Local Municipality",
       ward: "",
       location: "",
       category: "",
+      subcategory: "",
       priority: "medium",
       title: "",
       description: "",
       photoUrl: "",
+      images: [],
     },
   })
 
-  const nextStep = () => {
-    if (currentStep < 3) {
+  // Ensure municipality value is set when userData changes
+  useEffect(() => {
+    const municipalityName = userData?.municipality?.name || 'Sol Plaatje Local Municipality'
+    form.setValue("municipality", municipalityName)
+  }, [userData, form])
+
+  // Dynamic wards based on user's municipality
+  const userMunicipalityId = userData?.municipality?.id || 'sol-plaatje' // Default to Sol Plaatje
+  const selectedMunicipalityId = userMunicipalityId
+
+  const wards = getWardsByMunicipality(selectedMunicipalityId).map(ward => ({
+    number: ward.number,
+    name: `Ward ${ward.number} - ${ward.name}`,
+    areas: ward.areas
+  }))
+
+  // Enhanced issue categories with municipal validation
+  const categories = MUNICIPAL_ISSUE_CATEGORIES.map(cat => ({
+    id: cat.id,
+    name: cat.name,
+    subcategories: cat.subcategories,
+    department: cat.department,
+    expectedResolution: cat.expectedResolution
+  }))
+
+  // Smart form validation for steps
+  const isStep1Valid = () => {
+    const values = form.getValues()
+    const hasName = values.reporterName && values.reporterName.trim() !== ''
+    const hasEmail = values.reporterEmail && values.reporterEmail.trim() !== ''
+    const hasPhone = values.reporterPhone && values.reporterPhone.trim() !== ''
+    return hasName && hasEmail && hasPhone
+  }
+
+  const isStep2Valid = () => {
+    const values = form.getValues()
+    const hasWard = values.ward && values.ward.trim() !== ''
+    const hasLocation = values.location && values.location.trim() !== ''
+    const hasMunicipality = values.municipality && values.municipality.trim() !== ''
+    return hasWard && hasLocation && hasMunicipality
+  }
+
+  const isStep3Valid = () => {
+    const values = form.getValues()
+    const hasCategory = values.category && values.category.trim() !== ''
+    const hasPriority = values.priority && values.priority.trim() !== ''
+    const hasTitle = values.title && values.title.trim() !== ''
+    const hasDescription = values.description && values.description.trim() !== ''
+    return hasCategory && hasPriority && hasTitle && hasDescription
+  }
+
+  // Progress calculation
+  const getFormProgress = () => {
+    let progress = 0
+    if (isStep1Valid()) progress += 33
+    if (isStep2Valid()) progress += 33
+    if (isStep3Valid()) progress += 34
+    return progress
+  }
+
+  const nextStep = async () => {
+    // Validate current step before proceeding
+    let isValid = false
+    
+    if (currentStep === 1) {
+      const result = await form.trigger(['reporterName', 'reporterEmail', 'reporterPhone'])
+      isValid = result && isStep1Valid()
+      
+      if (isValid) {
+        toast.success('Personal information saved!', {
+          icon: <CheckCircle className="w-5 h-5 text-green-500" />,
+          duration: 2000
+        })
+      }
+    } else if (currentStep === 2) {
+      // Ensure municipality is set before validation
+      const municipalityName = userData?.municipality?.name || 'Sol Plaatje Local Municipality'
+      form.setValue("municipality", municipalityName)
+      
+      const result = await form.trigger(['ward', 'location'])
+      const values = form.getValues()
+      
+      // More detailed validation for step 2
+      const hasWard = values.ward && values.ward.trim() !== ''
+      const hasLocation = values.location && values.location.trim() !== ''
+      const hasMunicipality = values.municipality && values.municipality.trim() !== ''
+      
+      isValid = result && hasWard && hasLocation && hasMunicipality
+      
+      // Debug logging (remove in production)
+      console.log('Step 2 validation:', {
+        ward: values.ward,
+        location: values.location,
+        municipality: values.municipality,
+        hasWard,
+        hasLocation,
+        hasMunicipality,
+        result,
+        isValid
+      })
+      
+      if (isValid) {
+        toast.success('Location details saved!', {
+          icon: <CheckCircle className="w-5 h-5 text-green-500" />,
+          duration: 2000
+        })
+      } else {
+        // More specific error messages
+        if (!hasWard) {
+          toast.error('Please select your ward', {
+            icon: <AlertTriangle className="w-5 h-5 text-red-500" />,
+            duration: 3000
+          })
+        } else if (!hasLocation) {
+          toast.error('Please provide the specific location', {
+            icon: <AlertTriangle className="w-5 h-5 text-red-500" />,
+            duration: 3000
+          })
+        }
+      }
+    }
+    
+    if (isValid && currentStep < 3) {
       setCurrentStep(currentStep + 1)
     }
   }
@@ -250,35 +357,183 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
     }
   }
 
+  // Validate municipal scope when category or description changes
+  // Image upload handlers
+  const handleImageUpload = async (files: FileList | File[]) => {
+    setIsUploading(true)
+    const fileArray = Array.from(files)
+    
+    // Validate files
+    const validFiles = fileArray.filter(file => {
+      const isImage = file.type.startsWith('image/')
+      const isValidSize = file.size <= 10 * 1024 * 1024 // 10MB limit
+      
+      if (!isImage) {
+        toast.error(`${file.name} is not a valid image file`, {
+          icon: <XCircle className="w-5 h-5 text-red-500" />
+        })
+        return false
+      }
+      
+      if (!isValidSize) {
+        toast.error(`${file.name} is too large. Maximum size is 10MB`, {
+          icon: <XCircle className="w-5 h-5 text-red-500" />
+        })
+        return false
+      }
+      
+      return true
+    })
+
+    // Check total images limit
+    if (uploadedImages.length + validFiles.length > 5) {
+      toast.error('Maximum 5 images allowed per report', {
+        icon: <XCircle className="w-5 h-5 text-red-500" />
+      })
+      setIsUploading(false)
+      return
+    }
+
+    try {
+      const newImages = await Promise.all(
+        validFiles.map(async (file) => {
+          // Create preview URL (in real app, you'd upload to a server)
+          const url = URL.createObjectURL(file)
+          
+          return {
+            id: Date.now() + Math.random().toString(36).substr(2, 9),
+            url,
+            fileName: file.name,
+            fileSize: file.size
+          }
+        })
+      )
+      
+      setUploadedImages(prev => [...prev, ...newImages])
+      form.setValue('images', [...uploadedImages, ...newImages])
+      
+      toast.success(`${newImages.length} image(s) uploaded successfully!`, {
+        icon: <CheckCircle className="w-5 h-5 text-green-500" />
+      })
+      
+    } catch (error) {
+      toast.error('Failed to upload images. Please try again.', {
+        icon: <XCircle className="w-5 h-5 text-red-500" />
+      })
+    } finally {
+      setIsUploading(false)
+    }
+  }
+
+  const removeImage = (imageId: string) => {
+    const updatedImages = uploadedImages.filter(img => img.id !== imageId)
+    setUploadedImages(updatedImages)
+    form.setValue('images', updatedImages)
+    
+    toast.success('Image removed', {
+      icon: <CheckCircle className="w-5 h-5 text-green-500" />
+    })
+  }
+
+  const handleDrag = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    
+    if (e.type === 'dragenter' || e.type === 'dragover') {
+      setDragActive(true)
+    } else if (e.type === 'dragleave') {
+      setDragActive(false)
+    }
+  }
+
+  const handleDrop = (e: React.DragEvent) => {
+    e.preventDefault()
+    e.stopPropagation()
+    setDragActive(false)
+    
+    if (e.dataTransfer.files && e.dataTransfer.files.length > 0) {
+      handleImageUpload(e.dataTransfer.files)
+    }
+  }
+
+  const validateScope = (category: string, description: string) => {
+    const isValid = validateMunicipalScope(category, description)
+    if (!isValid) {
+      const municipalityName = userData?.municipality?.name || 'your municipality'
+      setScopeValidation({
+        isValid: false,
+        message: `This issue appears to be outside ${municipalityName}'s scope. Please contact the appropriate authority or rephrase your report if this is a municipal service issue.`
+      })
+    } else {
+      setScopeValidation(null)
+    }
+    return isValid
+  }
+
   const onSubmitForm = async (formData: ReportFormData) => {
     setIsLoading(true)
     setError("")
 
     try {
+      // Validate municipal scope first
+      const isMunicipalScope = validateScope(formData.category, formData.description)
+      if (!isMunicipalScope && scopeValidation && !scopeValidation.isValid) {
+        throw new Error(scopeValidation.message)
+      }
+
       // Validate form data
       const validatedData = reportSchema.parse(formData)
       
-      // Create report data
+      // Generate enhanced reference number and QR code
+      const { referenceNumber, qrCode } = generateEnhancedReferenceNumber(validatedData.category, validatedData.ward)
+      
+      // Auto-assign department
+      const assignedDepartment = assignDepartment(validatedData.category)
+      
+      // Get expected resolution timeframe
+      const estimatedResolution = getExpectedResolutionTime(validatedData.category, validatedData.priority)
+      
+      // Create enhanced report data
       const reportData = {
         ...validatedData,
         id: Date.now().toString(),
+        referenceNumber,
+        qrCode,
+        assignedDepartment,
+        estimatedResolution,
+        isValidMunicipalIssue: true,
+        communicationLog: [{
+          id: Date.now().toString(),
+          timestamp: new Date().toISOString(),
+          type: 'system-update' as const,
+          message: `Report submitted successfully. Reference: ${referenceNumber}. Assigned to ${getMunicipalityById(selectedMunicipalityId)?.departments.find(d => d.id === assignedDepartment)?.name || 'Municipal Department'}. Expected resolution: ${estimatedResolution}.`,
+          sender: 'System',
+          recipient: validatedData.reporterEmail || validatedData.reporterName,
+          status: 'sent' as const
+        }],
         createdAt: new Date().toISOString(),
-        status: 'pending'
+        status: 'pending' as const
       }
       
-      // Show success message
-      toast.success("Civic report submitted successfully! Your municipality will respond soon.", {
+      // Show enhanced success message
+      toast.success(`Report submitted successfully! Reference: ${referenceNumber}`, {
         icon: <CheckCircle className="w-5 h-5" />,
-        description: "Municipal staff will review your report within 48 hours.",
-        duration: 4000,
+        description: `Assigned to ${getMunicipalityById(selectedMunicipalityId)?.departments.find(d => d.id === assignedDepartment)?.name || 'Municipal Department'}. Expected resolution: ${estimatedResolution}.`,
+        duration: 6000,
       })
 
       // Call parent submit handler
       onSubmit(reportData)
       
-      // Reset form
+      // Reset form and clear images
       form.reset()
       setCurrentStep(1)
+      setScopeValidation(null)
+      setSelectedCategory('')
+      setSelectedSubcategory('')
+      setUploadedImages([])
+      setIsUploading(false)
+      setDragActive(false)
       
     } catch (error: any) {
       console.error("Report submission error:", error)
@@ -346,6 +601,14 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
                   <p className="text-xs text-emerald-600 capitalize font-medium mt-1">{userData.type}</p>
                 </div>
                 
+                <button
+                  onClick={() => navigate('/municipal-portal')}
+                  className="w-full px-4 py-3 text-left text-sm text-gray-700 hover:bg-emerald-50 hover:text-emerald-700 flex items-center gap-3 transition-colors"
+                >
+                  <Building className="w-4 h-4" />
+                  Municipal Portal
+                </button>
+                
                 {userData.type === 'citizen' && (
                   <button
                     onClick={() => {
@@ -393,53 +656,74 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
                 Help improve your community by reporting civic issues to your municipality. Quick, simple, effective.
               </p>
               
-              {/* Step Progress Indicator - Fixed Flow */}
+              {/* Enhanced Progress Indicator */}
               <div className="bg-gradient-to-r from-emerald-50 to-blue-50 border border-emerald-200/50 rounded-2xl p-4 sm:p-5 lg:p-6 shadow-sm mx-auto max-w-md sm:max-w-lg backdrop-blur-sm">
-                {/* Progress Bar Container */}
+                
+                {/* Overall Progress Bar */}
+                <div className="mb-4">
+                  <div className="flex justify-between items-center mb-2">
+                    <span className="text-sm font-medium text-gray-700">Form Progress</span>
+                    <span className="text-sm font-bold text-emerald-600">{getFormProgress()}%</span>
+                  </div>
+                  <div className="w-full bg-gray-200 rounded-full h-2">
+                    <div 
+                      className="bg-gradient-to-r from-emerald-500 to-emerald-600 h-2 rounded-full transition-all duration-500 ease-out"
+                      style={{ width: `${getFormProgress()}%` }}
+                    />
+                  </div>
+                </div>
+
+                {/* Step Indicator Container */}
                 <div className="relative flex items-center justify-between mb-4">
                   {/* Step 1 */}
                   <div className="flex flex-col items-center z-10">
                     <div className={`w-10 h-10 sm:w-12 sm:h-12 rounded-full flex items-center justify-center text-sm sm:text-base font-bold transition-all shadow-sm ${
-                      currentStep >= 1 
+                      isStep1Valid() 
                         ? 'bg-emerald-500 text-white shadow-emerald-200' 
+                        : currentStep === 1
+                        ? 'bg-blue-500 text-white shadow-blue-200'
                         : 'bg-gray-200 text-gray-500'
                     }`}>
-                      1
+                      {isStep1Valid() ? <CheckCircle className="w-5 h-5" /> : '1'}
                     </div>
                   </div>
 
                   {/* Step 2 */}
                   <div className="flex flex-col items-center z-10">
                     <div className={`w-10 h-10 sm:w-12 sm:h-12 rounded-full flex items-center justify-center text-sm sm:text-base font-bold transition-all shadow-sm ${
-                      currentStep >= 2 
+                      isStep2Valid() 
                         ? 'bg-emerald-500 text-white shadow-emerald-200' 
+                        : currentStep === 2
+                        ? 'bg-blue-500 text-white shadow-blue-200'
                         : 'bg-gray-200 text-gray-500'
                     }`}>
-                      2
+                      {isStep2Valid() ? <CheckCircle className="w-5 h-5" /> : '2'}
                     </div>
                   </div>
 
                   {/* Step 3 */}
                   <div className="flex flex-col items-center z-10">
                     <div className={`w-10 h-10 sm:w-12 sm:h-12 rounded-full flex items-center justify-center text-sm sm:text-base font-bold transition-all shadow-sm ${
-                      currentStep >= 3 
+                      isStep3Valid() 
                         ? 'bg-emerald-500 text-white shadow-emerald-200' 
+                        : currentStep === 3
+                        ? 'bg-blue-500 text-white shadow-blue-200'
                         : 'bg-gray-200 text-gray-500'
                     }`}>
-                      3
+                      {isStep3Valid() ? <CheckCircle className="w-5 h-5" /> : '3'}
                     </div>
                   </div>
 
                   {/* Connecting Lines */}
                   <div className="absolute top-1/2 left-0 right-0 flex items-center justify-between px-5 sm:px-6 -translate-y-1/2">
                     {/* Line 1 to 2 */}
-                    <div className={`h-1 rounded-full transition-all duration-300 ${
-                      currentStep >= 2 ? 'bg-emerald-500' : 'bg-gray-200'
+                    <div className={`h-1 rounded-full transition-all duration-500 ${
+                      isStep1Valid() ? 'bg-emerald-500' : 'bg-gray-200'
                     }`} style={{width: 'calc(50% - 20px)'}}></div>
                     
                     {/* Line 2 to 3 */}
-                    <div className={`h-1 rounded-full transition-all duration-300 ${
-                      currentStep >= 3 ? 'bg-emerald-500' : 'bg-gray-200'
+                    <div className={`h-1 rounded-full transition-all duration-500 ${
+                      isStep2Valid() ? 'bg-emerald-500' : 'bg-gray-200'
                     }`} style={{width: 'calc(50% - 20px)'}}></div>
                   </div>
                 </div>
@@ -566,43 +850,38 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
                     </div>
                     
                     <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 sm:gap-6">
-                      <div className="space-y-3">
-                        <label htmlFor="municipality" className="block text-base sm:text-lg font-bold text-gray-800 mb-2">
-                          Municipality *
-                        </label>
-                        <select
-                          id="municipality"
-                          className={`w-full px-4 sm:px-5 py-4 sm:py-5 border-2 border-gray-200 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all duration-200 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md font-medium text-gray-800 text-base sm:text-lg ${
-                            form.formState.errors.municipality ? "border-red-500" : ""
-                          }`}
-                          {...form.register("municipality")}
-                        >
-                          <option value="">Select your municipality</option>
-                          {municipalities.map(municipality => (
-                            <option key={municipality} value={municipality}>{municipality}</option>
-                          ))}
-                        </select>
-                        {form.formState.errors.municipality && (
-                          <p className="text-red-500 text-sm mt-2 flex items-center gap-2">
-                            <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
-                            <span>{form.formState.errors.municipality.message}</span>
+                      
+                      <div className="space-y-3 lg:col-span-2">
+                        <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-4">
+                          <div className="flex items-center gap-2 mb-2">
+                            <Shield className="w-5 h-5 text-emerald-600" />
+                            <span className="font-bold text-emerald-800">Municipality</span>
+                          </div>
+                          <p className="text-emerald-700 font-medium">
+                            {userData?.municipality?.name || 'Sol Plaatje Municipality'} ({userData?.municipality?.province || 'Northern Cape'})
                           </p>
-                        )}
+                          <p className="text-sm text-emerald-600 mt-1">
+                            Based on your account registration
+                          </p>
+                        </div>
                       </div>
 
                       <div className="space-y-3">
                         <label htmlFor="ward" className="block text-base sm:text-lg font-bold text-gray-800 mb-2">
                           Ward *
                         </label>
-                        <input
+                        <select
                           id="ward"
-                          type="text"
-                          placeholder="Enter your ward number"
-                          className={`w-full px-4 sm:px-5 py-4 sm:py-5 border-2 border-gray-200 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all duration-200 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md font-medium text-gray-800 text-base sm:text-lg placeholder:text-gray-400 ${
+                          className={`w-full px-4 sm:px-5 py-4 sm:py-5 border-2 border-gray-200 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all duration-200 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md font-medium text-gray-800 text-base sm:text-lg ${
                             form.formState.errors.ward ? "border-red-500 focus:border-red-500" : ""
                           }`}
                           {...form.register("ward")}
-                        />
+                        >
+                          <option value="">Select your ward</option>
+                          {wards.map(ward => (
+                            <option key={ward.number} value={ward.number}>{ward.name}</option>
+                          ))}
+                        </select>
                         {form.formState.errors.ward && (
                           <p className="text-red-500 text-sm mt-2 flex items-center gap-2">
                             <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
@@ -696,66 +975,161 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
                       <h3 className="text-xl sm:text-2xl font-bold text-gray-800">Issue Details</h3>
                     </div>
                     
-                    <div className="space-y-6 sm:space-y-8">
-                      <div className="grid grid-cols-1 lg:grid-cols-2 gap-5 sm:gap-6">
-                        <div className="space-y-3">
-                          <label htmlFor="category" className="block text-base sm:text-lg font-bold text-gray-800 mb-2">
-                          Issue Type *
+                    <div className="space-y-8">
+                      {/* Municipal Service Type Section */}
+                      <div className="space-y-4">
+                        <label htmlFor="category" className="block text-base sm:text-lg font-bold text-gray-800">
+                          Municipal Service Type *
                         </label>
                         <select
                           id="category"
-                            className={`w-full px-4 sm:px-5 py-4 sm:py-5 border-2 border-gray-200 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all duration-200 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md font-medium text-gray-800 text-base sm:text-lg ${
+                          className={`w-full px-4 sm:px-5 py-4 sm:py-5 border-2 border-gray-200 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all duration-200 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md font-medium text-gray-800 text-base sm:text-lg ${
                             form.formState.errors.category ? "border-red-500" : ""
                           }`}
                           {...form.register("category")}
+                          onChange={(e) => {
+                            setSelectedCategory(e.target.value);
+                            setSelectedSubcategory('');
+                            form.setValue('category', e.target.value);
+                            form.setValue('subcategory', '');
+                            
+                            // Validate scope when category changes
+                            if (e.target.value && form.getValues('description')) {
+                              validateScope(e.target.value, form.getValues('description'));
+                            }
+                          }}
                         >
-                            <option value="">Select an issue type</option>
+                          <option value="">Select a municipal service</option>
                           {categories.map(category => (
-                            <option key={category} value={category}>{category}</option>
+                            <option key={category.id} value={category.id}>
+                              {category.name} - {category.expectedResolution}
+                            </option>
                           ))}
                         </select>
                         {form.formState.errors.category && (
-                            <p className="text-red-500 text-sm mt-2 flex items-center gap-2">
-                              <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
-                              <span>{form.formState.errors.category.message}</span>
+                          <p className="text-red-500 text-sm mt-2 flex items-center gap-2">
+                            <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                            <span>{form.formState.errors.category.message}</span>
                           </p>
+                        )}
+                        
+                        {/* Show department info when category is selected */}
+                        {selectedCategory && (
+                          <div className="mt-3 p-4 bg-emerald-50 border border-emerald-200 rounded-xl">
+                            <p className="text-sm text-emerald-700 font-medium flex items-center gap-2 mb-1">
+                              <Building className="w-4 h-4" />
+                              Department: {getMunicipalityById(selectedMunicipalityId)?.departments.find(d => d.id === categories.find(c => c.id === selectedCategory)?.department)?.name || 'Municipal Department'}
+                            </p>
+                            <p className="text-sm text-emerald-600 flex items-center gap-2">
+                              <Clock className="w-4 h-4" />
+                              Expected resolution: {categories.find(c => c.id === selectedCategory)?.expectedResolution}
+                            </p>
+                          </div>
+                        )}
+
+                        {/* Subcategory field - only show when main category is selected */}
+                        {selectedCategory && (
+                          <div className="space-y-3 mt-4">
+                            <label htmlFor="subcategory" className="block text-base sm:text-lg font-bold text-gray-800">
+                              Specific Issue
+                            </label>
+                            <select
+                              id="subcategory"
+                              className="w-full px-4 sm:px-5 py-4 sm:py-5 border-2 border-gray-200 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all duration-200 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md font-medium text-gray-800 text-base sm:text-lg"
+                              {...form.register("subcategory")}
+                              onChange={(e) => setSelectedSubcategory(e.target.value)}
+                            >
+                              <option value="">Select specific issue (optional)</option>
+                              {categories.find(c => c.id === selectedCategory)?.subcategories.map(subcat => (
+                                <option key={subcat} value={subcat}>{subcat}</option>
+                              ))}
+                            </select>
+                          </div>
                         )}
                       </div>
 
-                        <div className="space-y-3">
-                          <label htmlFor="priority" className="block text-base sm:text-lg font-bold text-gray-800 mb-2">
-                            Priority Level *
+                      {/* Priority Level Section */}
+                      <div className="space-y-4">
+                        <label className="block text-base sm:text-lg font-bold text-gray-800">
+                          Priority Level *
                         </label>
-                        <div className="relative">
-                          <select
-                            id="priority"
-                              className={`w-full px-4 sm:px-5 py-4 sm:py-5 pr-12 sm:pr-16 border-2 border-gray-200 rounded-xl sm:rounded-2xl focus:outline-none focus:ring-4 focus:ring-emerald-500/20 focus:border-emerald-500 transition-all duration-200 bg-white/90 backdrop-blur-sm shadow-sm hover:shadow-md font-medium text-gray-800 text-base sm:text-lg ${
-                              form.formState.errors.priority ? "border-red-500" : ""
-                            }`}
-                            {...form.register("priority")}
-                          >
-                              <option value="low">Low - Can wait a few days</option>
-                              <option value="medium">Medium - Needs attention soon</option>
-                              <option value="high">High - Urgent, affects many people</option>
-                              <option value="emergency">Emergency - Immediate danger</option>
-                          </select>
-                          {form.watch("priority") && (
-                              <div className="absolute right-4 sm:right-6 top-1/2 transform -translate-y-1/2 pointer-events-none">
-                              {priorityIcons[form.watch("priority") as keyof typeof priorityIcons]}
-                            </div>
-                          )}
+                        
+                        {/* Visual Priority Cards - Mobile 2x2, Desktop spread */}
+                        <div className="grid grid-cols-2 sm:grid-cols-2 xl:grid-cols-4 gap-3 sm:gap-4 lg:gap-6">
+                          {[
+                            { 
+                              value: 'low', 
+                              label: 'Low Priority', 
+                              description: 'Can wait a few days',
+                              icon: <Circle className="w-5 h-5 sm:w-6 sm:h-6" />,
+                              color: 'border-green-200 bg-green-50 text-green-700 hover:border-green-300 hover:bg-green-100',
+                              selectedColor: 'border-green-500 bg-green-100 ring-2 ring-green-200'
+                            },
+                            { 
+                              value: 'medium', 
+                              label: 'Medium Priority', 
+                              description: 'Needs attention soon',
+                              icon: <AlertCircle className="w-5 h-5 sm:w-6 sm:h-6" />,
+                              color: 'border-yellow-200 bg-yellow-50 text-yellow-700 hover:border-yellow-300 hover:bg-yellow-100',
+                              selectedColor: 'border-yellow-500 bg-yellow-100 ring-2 ring-yellow-200'
+                            },
+                            { 
+                              value: 'high', 
+                              label: 'High Priority', 
+                              description: 'Urgent, affects many',
+                              icon: <AlertTriangle className="w-5 h-5 sm:w-6 sm:h-6" />,
+                              color: 'border-orange-200 bg-orange-50 text-orange-700 hover:border-orange-300 hover:bg-orange-100',
+                              selectedColor: 'border-orange-500 bg-orange-100 ring-2 ring-orange-200'
+                            },
+                            { 
+                              value: 'emergency', 
+                              label: 'Emergency', 
+                              description: 'Immediate danger',
+                              icon: <Zap className="w-5 h-5 sm:w-6 sm:h-6" />,
+                              color: 'border-red-200 bg-red-50 text-red-700 hover:border-red-300 hover:bg-red-100',
+                              selectedColor: 'border-red-500 bg-red-100 ring-2 ring-red-200'
+                            }
+                          ].map((priority) => (
+                            <button
+                              key={priority.value}
+                              type="button"
+                              onClick={() => {
+                                form.setValue('priority', priority.value as any)
+                                form.trigger('priority')
+                              }}
+                              className={`p-3 sm:p-5 lg:p-6 rounded-xl border-2 transition-all duration-200 text-left hover:scale-[1.02] active:scale-95 focus:outline-none focus:ring-2 focus:ring-offset-2 focus:ring-emerald-500 shadow-sm hover:shadow-md ${
+                                form.watch('priority') === priority.value 
+                                  ? priority.selectedColor 
+                                  : priority.color
+                              }`}
+                            >
+                              <div className="flex flex-col items-center text-center space-y-2 sm:space-y-3">
+                                <div className="flex items-center justify-center w-8 h-8 sm:w-12 sm:h-12 rounded-full bg-white/80 shadow-sm">
+                                  {priority.icon}
+                                </div>
+                                <div className="space-y-1">
+                                  <span className="font-bold text-sm sm:text-base lg:text-lg block leading-tight">{priority.label}</span>
+                                  <p className="text-xs sm:text-sm opacity-90 leading-relaxed">{priority.description}</p>
+                                </div>
+                              </div>
+                            </button>
+                          ))}
                         </div>
+                        
+                        {/* Hidden input for form validation */}
+                        <input type="hidden" {...form.register("priority")} />
+                        
                         {form.formState.errors.priority && (
-                            <p className="text-red-500 text-sm mt-2 flex items-center gap-2">
-                              <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
-                              <span>{form.formState.errors.priority.message}</span>
+                          <p className="text-red-500 text-sm mt-2 flex items-center gap-2">
+                            <AlertTriangle className="w-4 h-4 text-red-500 flex-shrink-0" />
+                            <span>{form.formState.errors.priority.message}</span>
                           </p>
                         )}
                       </div>
-                    </div>
 
-                      <div className="space-y-3">
-                        <label htmlFor="title" className="block text-base sm:text-lg font-bold text-gray-800 mb-2">
+                      {/* Issue Title Section */}
+                      <div className="space-y-4">
+                        <label htmlFor="title" className="block text-base sm:text-lg font-bold text-gray-800">
                           Issue Title *
                         </label>
                         <input
@@ -775,8 +1149,9 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
                         )}
                       </div>
 
-                      <div className="space-y-3">
-                        <label htmlFor="description" className="block text-base sm:text-lg font-bold text-gray-800 mb-2">
+                      {/* Issue Description Section */}
+                      <div className="space-y-4">
+                        <label htmlFor="description" className="block text-base sm:text-lg font-bold text-gray-800">
                           Detailed Description *
                         </label>
                         <textarea
@@ -787,6 +1162,12 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
                             form.formState.errors.description ? "border-red-500 focus:border-red-500" : ""
                           }`}
                           {...form.register("description")}
+                          onChange={(e) => {
+                            // Validate scope when description changes
+                            if (selectedCategory && e.target.value) {
+                              validateScope(selectedCategory, e.target.value);
+                            }
+                          }}
                         />
                         {form.formState.errors.description && (
                           <p className="text-red-500 text-sm mt-2 flex items-center gap-2">
@@ -794,46 +1175,215 @@ export default function ReportForm({ onBack, onSubmit }: ReportFormProps) {
                             <span>{form.formState.errors.description.message}</span>
                           </p>
                         )}
+                        
+                        {/* Municipal scope validation warning */}
+                        {scopeValidation && !scopeValidation.isValid && (
+                          <div className="mt-3 p-4 bg-yellow-50 border border-yellow-200 rounded-lg">
+                            <div className="flex items-start gap-3">
+                              <AlertTriangle className="w-5 h-5 text-yellow-600 flex-shrink-0 mt-0.5" />
+                              <div>
+                                <p className="text-sm font-medium text-yellow-800 mb-1 flex items-center gap-2">
+                                  <AlertTriangle className="w-4 h-4" />
+                                  Outside Municipal Scope
+                                </p>
+                                <p className="text-sm text-yellow-700">
+                                  {scopeValidation.message}
+                                </p>
+                                <div className="mt-2 text-xs text-yellow-600">
+                                  <p className="flex items-center gap-2">
+                                    <Phone className="w-3 h-3" />
+                                    For other issues, contact:
+                                  </p>
+                                  <p>• Provincial services: 0800 123 456</p>
+                                  <p>• National services: 0800 789 123</p>
+                                  <p>• Emergency services: 10111</p>
+                                </div>
+                              </div>
+                            </div>
+                          </div>
+                        )}
                       </div>
-              </div>
 
-              {error && (
-                      <div className="bg-red-50 border border-red-200 rounded-xl p-4 mb-6">
+                      {/* Enhanced Image Upload Section */}
+                      <div className="space-y-4">
+                        <label className="block text-base sm:text-lg font-bold text-gray-800 mb-2">
+                          Add Photos (Optional)
+                        </label>
+                        <p className="text-sm text-gray-600 mb-4">
+                          Photos help us understand the issue better and speed up resolution. Maximum 5 images, 10MB each.
+                        </p>
+
+                        {/* Drag & Drop Upload Area */}
+                        <div
+                          className={`relative border-2 border-dashed rounded-2xl p-8 transition-all duration-300 ${
+                            dragActive 
+                              ? 'border-emerald-500 bg-emerald-50' 
+                              : 'border-gray-300 hover:border-emerald-400 bg-gray-50'
+                          } ${isUploading ? 'opacity-50 pointer-events-none' : ''}`}
+                          onDragEnter={handleDrag}
+                          onDragLeave={handleDrag}
+                          onDragOver={handleDrag}
+                          onDrop={handleDrop}
+                        >
+                          <input
+                            type="file"
+                            id="image-upload"
+                            multiple
+                            accept="image/*"
+                            onChange={(e) => e.target.files && handleImageUpload(e.target.files)}
+                            className="absolute inset-0 w-full h-full opacity-0 cursor-pointer"
+                            disabled={isUploading}
+                          />
+                          
+                          <div className="text-center">
+                            {isUploading ? (
+                              <div className="flex flex-col items-center gap-3">
+                                <Loader2 className="w-12 h-12 text-emerald-500 animate-spin" />
+                                <p className="text-emerald-600 font-medium">Uploading images...</p>
+                              </div>
+                            ) : (
+                              <div className="flex flex-col items-center gap-3">
+                                <Camera className="w-12 h-12 text-gray-400" />
+                                <div>
+                                  <p className="text-lg font-medium text-gray-700 mb-1">
+                                    Drag & drop images here, or <span className="text-emerald-600 underline">click to browse</span>
+                                  </p>
+                                  <p className="text-sm text-gray-500">
+                                    Supports JPG, PNG, GIF • Max 10MB per image
+                                  </p>
+                                </div>
+                              </div>
+                            )}
+                          </div>
+                        </div>
+
+                        {/* Image Previews */}
+                        {uploadedImages.length > 0 && (
+                          <div className="space-y-3">
+                            <h4 className="font-medium text-gray-800 flex items-center gap-2">
+                              <CheckCircle className="w-5 h-5 text-green-500" />
+                              Uploaded Images ({uploadedImages.length}/5)
+                            </h4>
+                            
+                            <div className="grid grid-cols-2 sm:grid-cols-3 lg:grid-cols-5 gap-4">
+                              {uploadedImages.map((image) => (
+                                <div key={image.id} className="relative group">
+                                  <div className="aspect-square bg-gray-100 rounded-xl overflow-hidden shadow-sm">
+                                    <img
+                                      src={image.url}
+                                      alt={image.fileName}
+                                      className="w-full h-full object-cover transition-transform group-hover:scale-105"
+                                    />
+                                  </div>
+                                  
+                                  {/* Remove button */}
+                                  <button
+                                    type="button"
+                                    onClick={() => removeImage(image.id)}
+                                    className="absolute -top-2 -right-2 w-6 h-6 bg-red-500 hover:bg-red-600 text-white rounded-full flex items-center justify-center transition-colors shadow-lg opacity-0 group-hover:opacity-100"
+                                  >
+                                    <XCircle className="w-4 h-4" />
+                                  </button>
+                                  
+                                  {/* File info */}
+                                  <div className="mt-2">
+                                    <p className="text-xs text-gray-600 truncate" title={image.fileName}>
+                                      {image.fileName}
+                                    </p>
+                                    <p className="text-xs text-gray-400">
+                                      {(image.fileSize / 1024 / 1024).toFixed(1)}MB
+                                    </p>
+                                  </div>
+                                </div>
+                              ))}
+                            </div>
+                            
+                            {/* Quick tips */}
+                            <div className="bg-blue-50 border border-blue-200 rounded-lg p-3">
+                              <p className="text-sm text-blue-700 font-medium mb-1 flex items-center gap-2">
+                                <Camera className="w-4 h-4" />
+                                Photo Tips:
+                              </p>
+                              <ul className="text-xs text-blue-600 space-y-1">
+                                <li>• Take photos from multiple angles</li>
+                                <li>• Ensure good lighting for clarity</li>
+                                <li>• Include landmarks for location context</li>
+                                <li>• Capture the full extent of the issue</li>
+                              </ul>
+                            </div>
+                          </div>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Error Display */}
+                    {error && (
+                      <div className="bg-red-50 border border-red-200 rounded-xl p-4">
                         <div className="flex">
                           <AlertCircle className="h-5 w-5 text-red-400 mt-0.5 mr-3 flex-shrink-0" />
                           <p className="text-red-800 text-sm font-medium">{error}</p>
                         </div>
-                </div>
-              )}
+                      </div>
+                    )}
 
-                    <div className="flex gap-3 sm:gap-4 justify-between mt-8">
+                    {/* Report Summary */}
+                    <div className="bg-emerald-50 border border-emerald-200 rounded-xl p-6">
+                      <h4 className="font-bold text-emerald-800 mb-4 flex items-center gap-2">
+                        <CheckCircle className="w-5 h-5" />
+                        Report Summary
+                      </h4>
+                      <div className="grid grid-cols-1 sm:grid-cols-2 gap-3 text-sm text-emerald-700">
+                        <p><span className="font-medium">Category:</span> {categories.find(c => c.id === form.watch('category'))?.name || 'Not selected'}</p>
+                        <p><span className="font-medium">Priority:</span> {form.watch('priority')?.charAt(0).toUpperCase() + form.watch('priority')?.slice(1) || 'Not selected'}</p>
+                        <p><span className="font-medium">Location:</span> {form.watch('location') || 'Not specified'}</p>
+                        {uploadedImages.length > 0 && (
+                          <p><span className="font-medium">Images:</span> {uploadedImages.length} photo(s) attached</p>
+                        )}
+                      </div>
+                    </div>
+
+                    {/* Navigation Buttons */}
+                    <div className="flex flex-col sm:flex-row gap-4 justify-between items-stretch sm:items-center pt-6">
                       <button
                         type="button"
                         onClick={prevStep}
-                        className="bg-gray-500 hover:bg-gray-600 text-white px-4 sm:px-6 py-3 sm:py-3 rounded-xl font-bold transition-colors flex items-center justify-center gap-2 shadow-md"
+                        className="order-2 sm:order-1 bg-gray-500 hover:bg-gray-600 text-white px-6 py-3 rounded-xl font-bold transition-colors flex items-center justify-center gap-2 shadow-md"
                       >
                         <ChevronLeft className="w-5 h-5" />
                         Previous
                       </button>
 
-                <button
-                  type="submit"
-                  disabled={isLoading}
-                        className="bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-6 sm:px-8 py-3 sm:py-3 rounded-xl font-bold transition-all duration-300 transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none focus:outline-none focus:ring-4 focus:ring-emerald-500/20 flex items-center justify-center gap-2 shadow-lg"
-                >
-                  {isLoading ? (
-                    <>
+                      <button
+                        type="submit"
+                        disabled={isLoading || !isStep3Valid()}
+                        className={`flex-1 max-w-md bg-gradient-to-r from-emerald-500 to-emerald-600 hover:from-emerald-600 hover:to-emerald-700 text-white px-6 sm:px-8 py-4 sm:py-4 rounded-xl font-bold transition-all duration-300 transform hover:scale-105 active:scale-95 disabled:opacity-50 disabled:cursor-not-allowed disabled:transform-none focus:outline-none focus:ring-4 focus:ring-emerald-500/20 flex items-center justify-center gap-3 shadow-lg text-lg ${
+                          !isStep3Valid() ? 'cursor-not-allowed opacity-50' : 'hover:shadow-xl'
+                        }`}
+                      >
+                        {isLoading ? (
+                          <>
                             <div className="w-5 h-5 border-2 border-white border-t-transparent rounded-full animate-spin"></div>
-                            <span>Submitting...</span>
-                    </>
-                  ) : (
-                    <>
+                            <span>Submitting Report...</span>
+                          </>
+                        ) : !isStep3Valid() ? (
+                          <>
+                            <AlertTriangle className="w-5 h-5" />
+                            <span>Complete All Fields</span>
+                          </>
+                        ) : (
+                          <>
                             <Send className="w-5 h-5" />
                             <span>Submit Report</span>
-                    </>
-                  )}
-                </button>
+                          </>
+                        )}
+                      </button>
                     </div>
+                    
+                    {!isStep3Valid() && (
+                      <p className="text-sm text-gray-500 text-center mt-3">
+                        Please fill in all required fields to submit your report
+                      </p>
+                    )}
               </div>
                 </motion.div>
               )}
